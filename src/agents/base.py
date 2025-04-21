@@ -1114,7 +1114,7 @@ Provide your insights on the content, responding naturally as in a lab discussio
         
             
             
-    def search_web(self, query: str, search_type: str = "arxiv", num_results: int = 5) -> List[Dict[str, Any]]:
+    def search_web(self, query: str, search_type: str = "arxiv", num_results: int = 5, months: int = 12) -> List[Dict[str, Any]]:
         """
         Search the web for information.
         
@@ -1122,6 +1122,7 @@ Provide your insights on the content, responding naturally as in a lab discussio
             query: Search query
             search_type: Type of search ("arxiv" or "biorxiv")
             num_results: Maximum number of results to return
+            months: For biorxiv, number of months to search back (default: 12)
             
         Returns:
             List of search result dictionaries
@@ -1132,7 +1133,7 @@ Provide your insights on the content, responding naturally as in a lab discussio
                 return arxiv_search.search(query, num_results)
             elif search_type.lower() == "biorxiv":
                 biorxiv_search = BioRxivSearch(max_results=num_results)
-                return biorxiv_search.search(query, num_results)
+                return biorxiv_search.search(query, num_results, months=months)
             else:
                 return []
         except Exception as e:

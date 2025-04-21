@@ -66,11 +66,11 @@ def _load_pdf_file(file_path: str) -> str:
 
 def fetch_paper_content(paper_id: str, source: str = "arxiv", metadata: Dict[str, Any] = None) -> str:
     """
-    Centralized function to fetch paper content from various sources (arXiv, bioRxiv, or URL).
+    Centralized function to fetch paper content from various sources (arXiv, bioRxiv, URL, or local file).
     
     Args:
-        paper_id: Paper ID (arXiv ID, DOI, or URL)
-        source: Source of the paper ('arxiv', 'biorxiv', or 'url')
+        paper_id: Paper ID (arXiv ID, DOI, URL, or local file path)
+        source: Source of the paper ('arxiv', 'biorxiv', 'url', or 'local_folder')
         metadata: Optional metadata about the paper (title, authors, etc.)
         
     Returns:
@@ -87,6 +87,10 @@ def fetch_paper_content(paper_id: str, source: str = "arxiv", metadata: Dict[str
         # Handle bioRxiv papers
         elif source.lower() == "biorxiv":
             return _fetch_biorxiv_paper(paper_id, metadata)
+        
+        # Handle local file
+        elif source.lower() == "local_folder" and os.path.exists(paper_id):
+            return _fetch_local_paper(paper_id, metadata)
         
         # Handle general URL (could be PDF or webpage)
         elif source.lower() == "url" or paper_id.startswith("http"):
@@ -209,7 +213,7 @@ def _fetch_biorxiv_paper(paper_id: str, metadata: Dict[str, Any] = None) -> str:
                 
                 if pdf_text:
                     # Try to get metadata from the API
-                    meta_url = f"https://api.biorxiv.org/details/biorxiv/{doi}"
+                    meta_url = f"https://api.biorxiv.org/details/biorxiv/{doi}/json"
                     meta_response = requests.get(meta_url, headers=DEFAULT_HEADERS)
                     meta_data = meta_response.json()
                     
@@ -257,7 +261,7 @@ def _fetch_biorxiv_paper(paper_id: str, metadata: Dict[str, Any] = None) -> str:
             print(f"Error downloading/parsing PDF: {str(pdf_error)}")
         
         # Fallback to just getting metadata if full text parsing failed
-        meta_url = f"https://api.biorxiv.org/details/biorxiv/{doi}"
+        meta_url = f"https://api.biorxiv.org/details/biorxiv/{doi}/json"
         meta_response = requests.get(meta_url, headers=DEFAULT_HEADERS)
         meta_data = meta_response.json()
         
@@ -272,6 +276,51 @@ def _fetch_biorxiv_paper(paper_id: str, metadata: Dict[str, Any] = None) -> str:
     
     except Exception as e:
         return f"Error fetching bioRxiv paper: {str(e)}"
+
+def _fetch_local_paper(file_path: str, metadata: Dict[str, Any] = None) -> str:
+    """
+    Load content from a local paper file.
+    
+    Args:
+        file_path: Path to the local file
+        metadata: Optional metadata about the paper
+        
+    Returns:
+        Paper content as text
+    """
+    try:
+        # First check if the file exists
+        if not os.path.exists(file_path):
+            return f"Error: File not found: {file_path}"
+        
+        # Extract file content
+        content = load_document(file_path)
+        
+        if not content:
+            return f"Error: Could not extract content from file: {file_path}"
+        
+        # Get title from metadata or filename
+        title = "Unknown Title"
+        if metadata and "title" in metadata:
+            title = metadata["title"]
+        else:
+            # Extract title from filename (remove extension and replace underscores/hyphens)
+            title = os.path.splitext(os.path.basename(file_path))[0]
+            title = title.replace('_', ' ').replace('-', ' ')
+        
+        # Determine authors from metadata
+        authors = "Unknown Authors"
+        if metadata and "authors" in metadata:
+            if isinstance(metadata["authors"], list):
+                authors = ", ".join(metadata["authors"])
+            else:
+                authors = str(metadata["authors"])
+        
+        # Combine metadata with content
+        return f"Title: {title}\n\nAuthors: {authors}\n\nFull Text:\n{content}"
+    
+    except Exception as e:
+        return f"Error loading local paper: {str(e)}"
 
 def _fetch_url_content(url: str, metadata: Dict[str, Any] = None) -> str:
     """

@@ -159,7 +159,7 @@ class ArxivSearch:
             return ""
 
 class BioRxivSearch:
-    """Class for searching and retrieving papers from bioRxiv."""
+    """Class for searching and retrieving papers from bioRxiv using the official API."""
     
     def __init__(self, max_results: int = 5):
         """
@@ -169,16 +169,18 @@ class BioRxivSearch:
             max_results: Maximum number of results to return per search
         """
         self.max_results = max_results
-        self.base_url = "https://api.biorxiv.org/details/biorxiv"
+        self.base_url = "https://api.biorxiv.org"
     
     def search(self, query: str, max_results: Optional[int] = None, 
-             max_retries: int = 5, initial_delay: float = 1.0) -> List[Dict[str, Any]]:
+               months: int = 12, max_retries: int = 3, 
+               initial_delay: float = 1.0) -> List[Dict[str, Any]]:
         """
-        Search bioRxiv for papers matching the query with exponential backoff retries.
+        Search bioRxiv for papers matching the query with API integration.
         
         Args:
             query: Search query string
             max_results: Maximum number of results to return (overrides instance default)
+            months: Number of months to search back from current date (default: 12)
             max_retries: Maximum number of retry attempts
             initial_delay: Initial delay in seconds before retrying
             
@@ -188,56 +190,128 @@ class BioRxivSearch:
         if max_results is None:
             max_results = self.max_results
         
+        # Search terms for matching
+        search_terms = query.strip().lower().split()
+        
+        # Fetch papers only ONCE, then reuse for all retries
+        all_papers = None
+        
+        # Track matching mode for each attempt
+        matching_mode = "all"  # Start with strict matching
+        
         # Implement retry logic with exponential backoff
         for attempt in range(max_retries):
             try:
-                # Attempt the scraping search
-                results = self._search_via_scraping(query, max_results)
-                
-                # If we got results, return them
-                if results and len(results) > 0:
-                    if attempt > 0:
-                        print(f"✅ Successfully found {len(results)} results from bioRxiv on attempt {attempt+1}")
-                    return results
-                
-                # If no results but no error, try with a modified query
-                if attempt < max_retries - 1:
-                    # Calculate delay with exponential backoff
-                    delay = initial_delay * (2 ** attempt)
-                    print(f"⚠️ No bioRxiv results found for '{query}'. Retrying in {delay:.1f}s... (Attempt {attempt+1}/{max_retries})")
+                # On first attempt, fetch papers from API
+                if attempt == 0:
+                    # Calculate date range based on months parameter
+                    from datetime import datetime, timedelta
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=30 * months)
+                    date_range = f"{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
                     
-                    # Try different query strategies on subsequent attempts
-                    if " AND " in query or " OR " in query:
-                        # Simplify complex queries
-                        query = query.replace(" AND ", " ").replace(" OR ", " ")
-                    elif len(query.split()) > 2:
-                        # Remove the least important word for next attempt
-                        words = query.split()
-                        stopwords = ["the", "a", "an", "in", "on", "of", "and", "for", "with", "to"]
-                        # First try removing stopwords if present
-                        for stopword in stopwords:
-                            if stopword in words:
-                                words.remove(stopword)
-                                break
-                        else:
-                            # Otherwise remove the last word
-                            words = words[:-1]
-                        query = " ".join(words)
+                    # Fetch papers ONLY on first attempt (we'll reuse them for retries)
+                    all_papers = self._fetch_papers_from_api(date_range, months)
+                    
+                    if not all_papers:
+                        print(f"Error fetching papers from bioRxiv.")
+                        return []
+                
+                # Filter papers based on current matching mode
+                filtered_results = []
+                
+                # Match papers against search terms
+                for paper in all_papers:
+                    title = paper.get("title", "").lower()
+                    abstract = paper.get("abstract", "").lower()
+                    
+                    # Different matching strategies based on attempt
+                    matches = False
+                    if matching_mode == "all":
+                        # Require ALL terms to match (strictest)
+                        matches = all(term in title or term in abstract for term in search_terms)
+                    elif matching_mode == "any":
+                        # Require ANY term to match (more lenient)
+                        matches = any(term in title or term in abstract for term in search_terms)
+                    else:
+                        # Most lenient: check substring matches
+                        matches = any(term in title or term in abstract for term in search_terms)
+                    
+                    # Add matching papers to results
+                    if matches:
+                        doi = paper.get("doi", "")
+                        version = paper.get("version", "1")
+                        
+                        result = {
+                            "title": paper.get("title", "Untitled"),
+                            "summary": paper.get("abstract", ""),
+                            "authors": paper.get("authors", "").split("; "),
+                            "published": paper.get("date", ""),
+                            "doi": doi,
+                            "url": f"https://www.biorxiv.org/content/{doi}v{version}",
+                            "pdf_url": f"https://www.biorxiv.org/content/{doi}v{version}.full.pdf",
+                            "source": "biorxiv",
+                            "version": version,
+                            "category": paper.get("category", "")
+                        }
+                        filtered_results.append(result)
+                
+                # Remove duplicate papers by DOI, keeping only the latest version
+                deduplicated_results = {}
+                for paper in filtered_results:
+                    doi_base = paper.get("doi", "").split("v")[0]  # Get base DOI without version
+                    version = int(paper.get("version", "1"))
+                    
+                    # If this is a new paper or a newer version, keep it
+                    if doi_base not in deduplicated_results or version > int(deduplicated_results[doi_base].get("version", "1")):
+                        deduplicated_results[doi_base] = paper
+                
+                # Convert back to list
+                filtered_results = list(deduplicated_results.values())
+                
+                # Sort by relevance
+                def relevance_score(paper):
+                    score = 0
+                    title = paper["title"].lower()
+                    abstract = paper["summary"].lower()
+                    
+                    for term in search_terms:
+                        # Weight title matches more heavily
+                        if term in title:
+                            score += 10
+                        if term in abstract:
+                            score += 5
+                        
+                        # Additional score for frequency
+                        score += title.count(term) * 2
+                        score += abstract.count(term)
+                    
+                    return score
+                
+                filtered_results.sort(key=relevance_score, reverse=True)
+                
+                # If we found any results, return them
+                if filtered_results:
+                    if attempt > 0:
+                        print(f"✅ Successfully found {len(filtered_results)} results from bioRxiv on retry attempt {attempt+1}")
+                    return filtered_results[:max_results]
+                
+                # No results but still have retries left
+                if attempt < max_retries - 1:
+                    delay = initial_delay * (2 ** attempt)
+                    
+                    # Change matching strategy for next attempt
+                    if attempt == 0:
+                        print(f"⚠️ No bioRxiv results found for '{query}'. Retrying with less strict matching in {delay:.1f}s... (Attempt {attempt+1}/{max_retries})")
+                        matching_mode = "any"  # Next attempt: match ANY terms
+                    else:
+                        print(f"⚠️ Still no results. Trying broader matching in {delay:.1f}s... (Attempt {attempt+1}/{max_retries})")
+                        matching_mode = "substring"  # Last attempt: try substring matching
                     
                     time.sleep(delay)
             
-            except requests.exceptions.RequestException as e:
-                # Handle network-related errors specifically
-                if attempt < max_retries - 1:
-                    delay = initial_delay * (2 ** attempt)
-                    print(f"⚠️ bioRxiv request failed: {str(e)}. Retrying in {delay:.1f}s... (Attempt {attempt+1}/{max_retries})")
-                    time.sleep(delay)
-                else:
-                    print(f"❌ bioRxiv search failed after {max_retries} attempts: {str(e)}")
-                    return []
-                    
             except Exception as e:
-                # Handle other errors
+                # Handle any errors
                 if attempt < max_retries - 1:
                     delay = initial_delay * (2 ** attempt)
                     print(f"⚠️ bioRxiv search error: {str(e)}. Retrying in {delay:.1f}s... (Attempt {attempt+1}/{max_retries})")
@@ -250,221 +324,76 @@ class BioRxivSearch:
         print(f"⚠️ No results found from bioRxiv after {max_retries} attempts with query: '{query}'")
         return []
     
-    def _search_via_scraping(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+    def _fetch_papers_from_api(self, date_range: str, months: int) -> List[Dict[str, Any]]:
         """
-        Search bioRxiv for papers via web scraping with improved robustness.
+        Fetch papers from bioRxiv API for the given date range.
         
         Args:
-            query: Search query string
-            max_results: Maximum number of results to return
+            date_range: Range of dates in format "YYYY-MM-DD/YYYY-MM-DD"
+            months: Number of months (for logging purposes)
             
         Returns:
-            List of paper dictionaries with metadata
+            List of paper dictionaries from the API
         """
-        search_query = quote_plus(query)
-        url = f"https://www.biorxiv.org/search/{search_query}"
+        # Initialize papers collection
+        all_papers = []
         
-        # Create a session to handle cookies
+        # Create a session with appropriate headers
         session = requests.Session()
-        # Use a more browser-like user agent with version randomization to avoid detection
-        user_agent = f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(90, 120)}.0.0.0 Safari/537.36"
-        session.headers.update({
-            **DEFAULT_HEADERS,
-            "User-Agent": user_agent
-        })
+        session.headers.update(DEFAULT_HEADERS)
         
-        # First visit homepage to get cookies and establish a normal browsing pattern
+        # Initial request - format: /details/biorxiv/[date_range]/[cursor]/json
+        cursor = 0
+        url = f"{self.base_url}/details/biorxiv/{date_range}/{cursor}/json"
+        
         try:
-            homepage_response = session.get("https://www.biorxiv.org/", timeout=15)
-            homepage_response.raise_for_status()
-            # Add a slightly variable delay to mimic human behavior
-            time.sleep(random.uniform(1.5, 3))
-        except requests.exceptions.RequestException as e:
-            print(f"Warning: Could not access bioRxiv homepage: {str(e)}")
-            # Continue anyway - we might still succeed with direct search
-        
-        # Get the search results page using the session
-        response = session.get(url, timeout=15)
-        response.raise_for_status()
-        
-        # Check if we got a captcha or empty page
-        if "captcha" in response.text.lower() or len(response.content) < 1000:
-            raise Exception("Possible rate limiting or captcha detected. Response too short or contains captcha")
+            print(f"Fetching bioRxiv papers from the past {months} months...")
+            response = session.get(url, timeout=15)
+            response.raise_for_status()
             
-        # Parse the HTML
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Check if we have search results section
-        search_container = soup.select_one(".search-results") or soup.select_one("#search-results")
-        if not search_container:
-            # Try alternative detection - look for common page elements
-            has_content = bool(soup.select_one("form#search-block-form"))
-            if not has_content:
-                raise Exception("Search results page structure not recognized")
-        
-        # Find all search result items (try multiple selectors)
-        result_items = soup.select(".search-result")
-        if not result_items:
-            result_items = soup.select(".highwire-article-wrapper")
-        if not result_items:
-            result_items = soup.select("li.search-result")
-        if not result_items:
-            # Try even more general selectors as last resort
-            result_items = soup.select(".item-list li") or soup.select("article")
+            data = response.json()
             
-        # Log details for debugging
-        if not result_items:
-            # Save response content to analyze structure
-            debug_info = f"bioRxiv search response length: {len(response.text)}"
-            # Check page title for clues
-            title_elem = soup.select_one("title")
-            if title_elem:
-                debug_info += f", Page title: {title_elem.get_text()}"
-            print(f"Debug: {debug_info}")
+            # Process results
+            if data and "collection" in data and data["collection"]:
+                all_papers.extend(data["collection"])
+                
+                # Get total count from messages
+                total_count = 0
+                if "messages" in data and data["messages"]:
+                    total_count = int(data["messages"][0].get("total", "0"))
+                
+                print(f"Found {total_count} papers in bioRxiv from the past {months} months")
+                
+                # Fetch additional pages if needed (bioRxiv API returns ~100 results per page)
+                max_papers_to_fetch = min(1000, total_count)  # Limit to reasonable number to search through
+                
+                while len(all_papers) < max_papers_to_fetch and cursor < total_count:
+                    cursor += 100
+                    next_page_url = f"{self.base_url}/details/biorxiv/{date_range}/{cursor}/json"
+                    
+                    try:
+                        page_response = session.get(next_page_url, timeout=15)
+                        page_response.raise_for_status()
+                        
+                        page_data = page_response.json()
+                        if page_data and "collection" in page_data and page_data["collection"]:
+                            all_papers.extend(page_data["collection"])
+                    except Exception as e:
+                        print(f"Warning: Error fetching additional page: {str(e)}")
+                        break
             
-        results = []
-        for item in result_items[:max_results]:
-            try:
-                # Extract title
-                title_elem = (item.select_one(".highwire-cite-title") or 
-                              item.select_one("h2") or 
-                              item.select_one(".title") or
-                              item.select_one("h3") or
-                              item.select_one("a[href*='/content/']"))
-                
-                title = title_elem.get_text(strip=True) if title_elem else "Untitled"
-                
-                # Extract URL
-                url = None
-                url_elem = title_elem.select_one("a") if title_elem else None
-                if url_elem and url_elem.has_attr('href'):
-                    url_path = url_elem['href']
-                    # Make sure it's an absolute URL
-                    if url_path.startswith('http'):
-                        url = url_path
-                    else:
-                        url = f"https://www.biorxiv.org{url_path}"
-                elif title_elem and title_elem.name == "a" and title_elem.has_attr('href'):
-                    url_path = title_elem['href']
-                    if url_path.startswith('http'):
-                        url = url_path
-                    else:
-                        url = f"https://www.biorxiv.org{url_path}"
-                
-                # If still no URL, search for any link
-                if not url:
-                    any_link = item.select_one("a[href*='biorxiv']")
-                    if any_link and any_link.has_attr('href'):
-                        url_path = any_link['href']
-                        if url_path.startswith('http'):
-                            url = url_path
-                        else:
-                            url = f"https://www.biorxiv.org{url_path}"
-                
-                # Extract authors
-                authors_elem = (item.select_one(".highwire-citation-authors") or 
-                                item.select_one(".meta-authors") or
-                                item.select_one(".authors"))
-                authors = []
-                if authors_elem:
-                    # Try multiple author selectors
-                    author_links = (authors_elem.select("span.highwire-citation-author") or 
-                                    authors_elem.select("span.author") or
-                                    authors_elem.select("a[href*='search-author']"))
-                    if author_links:
-                        authors = [author.get_text(strip=True) for author in author_links]
-                    else:
-                        # If no spans found, try getting the text directly
-                        authors_text = authors_elem.get_text(strip=True)
-                        if authors_text:
-                            # Split by commas for multiple authors
-                            authors = [a.strip() for a in authors_text.split(',')]
-                
-                # Extract abstract/summary
-                abstract_elem = (item.select_one(".highwire-cite-snippet") or 
-                                 item.select_one(".meta-abstract") or 
-                                 item.select_one(".abstract") or
-                                 item.select_one("p"))
-                abstract = abstract_elem.get_text(strip=True) if abstract_elem else ""
-                
-                # Extract publication date
-                date_elem = (item.select_one(".highwire-cite-metadata-date") or 
-                             item.select_one(".meta-pub-date") or
-                             item.select_one(".date"))
-                published = date_elem.get_text(strip=True) if date_elem else ""
-                
-                # If no date found, try to extract from URL or DOI
-                if not published:
-                    # Look for date in URL format (common pattern in bioRxiv URLs)
-                    if url:
-                        # bioRxiv URLs typically contain the DOI with date: 10.1101/YYYY.MM.DD.NNNNNN
-                        url_date_match = re.search(r'/10\.1101/(\d{4}\.\d{2}\.\d{2})\.', url)
-                        if url_date_match:
-                            date_str = url_date_match.group(1)
-                            # Convert to more readable format (YYYY-MM-DD)
-                            try:
-                                parts = date_str.split('.')
-                                if len(parts) == 3:
-                                    published = f"{parts[0]}-{parts[1]}-{parts[2]}"
-                            except:
-                                published = date_str
-                
-                # Extract DOI
-                doi = ""
-                doi_elem = (item.select_one(".highwire-cite-metadata-doi") or 
-                            item.select_one(".meta-doi") or
-                            item.select_one("[data-doi]"))
-                if doi_elem:
-                    if doi_elem.has_attr('data-doi'):
-                        doi = doi_elem['data-doi']
-                    else:
-                        doi_text = doi_elem.get_text(strip=True)
-                        doi_match = re.search(r'doi:\s*([\d\.]+/[\w\.]+)', doi_text)
-                        if doi_match:
-                            doi = doi_match.group(1)
-                
-                # If no DOI yet, try to extract from URL
-                if not doi and url:
-                    url_match = re.search(r'biorxiv\.org/content/([\d\.]+/[\w\.]+)', url)
-                    if url_match:
-                        doi = url_match.group(1)
-                
-                # Ensure we have a valid URL
-                if not url and doi:
-                    url = f"https://www.biorxiv.org/content/{doi}"
-                
-                # Skip if we don't have enough info to identify the paper
-                if not title or title == "Untitled" and not url and not doi:
-                    continue
-                
-                # Create result dictionary
-                result = {
-                    "title": title,
-                    "summary": abstract,
-                    "authors": authors,
-                    "published": published,
-                    "doi": doi,
-                    "url": url,
-                    "pdf_url": f"{url}.full.pdf" if url else "",
-                    "source": "biorxiv"
-                }
-                results.append(result)
-                
-            except Exception as e:
-                # If an error occurs processing one result, continue with others
-                print(f"Warning: Error extracting paper details: {str(e)}")
-                continue
+        except Exception as e:
+            print(f"Error fetching papers from bioRxiv: {str(e)}")
+            return []
         
-        if not results:
-            print(f"bioRxiv search for '{query}' returned no results using web scraping")
-        else:
-            print(f"✅ Successfully extracted {len(results)} results from bioRxiv")
-            
-        return results
+        return all_papers
+        
+    # We can remove this method since the filtering is now done directly in the search method
     
     def get_paper_text(self, paper_id: str, max_retries: int = 3) -> str:
         """
         Get the full text of a paper by its bioRxiv DOI or URL with retry logic.
+        Uses a combination of the API for metadata and document_loader for content.
         
         Args:
             paper_id: DOI or URL of the paper
@@ -475,10 +404,46 @@ class BioRxivSearch:
         """
         from ..utils.document_loader import fetch_paper_content
         
+        # Clean up the paper ID
+        paper_id = paper_id.strip()
+        doi = None
+        
+        # Extract DOI from different possible formats
+        if paper_id.startswith("http"):
+            # Extract DOI from URL
+            doi_match = re.search(r'biorxiv\.org/content/([\d\.]+/[\w\.]+)', paper_id)
+            if doi_match:
+                doi = doi_match.group(1)
+        elif paper_id.startswith("10."):
+            # Direct DOI format
+            doi = paper_id
+        
+        # If we have a DOI, try to get metadata from the API first
+        metadata = None
+        if doi:
+            try:
+                # Try to get metadata from the API using the correct endpoint format
+                # Format: https://api.biorxiv.org/details/biorxiv/[DOI]/json
+                meta_url = f"{self.base_url}/details/biorxiv/{doi}/json"
+                
+                session = requests.Session()
+                session.headers.update(DEFAULT_HEADERS)
+                meta_response = session.get(meta_url, timeout=10)
+                meta_response.raise_for_status()
+                
+                meta_data = meta_response.json()
+                
+                if meta_data.get("collection") and len(meta_data["collection"]) > 0:
+                    metadata = meta_data["collection"][0]
+                    print(f"✅ Successfully retrieved metadata for bioRxiv paper with DOI: {doi}")
+            except Exception as e:
+                print(f"Warning: Could not retrieve bioRxiv metadata from API: {str(e)}")
+        
+        # Now proceed with the document retrieval with retry logic
         for attempt in range(max_retries):
             try:
-                # Use the centralized paper retrieval function
-                paper_text = fetch_paper_content(paper_id, source="biorxiv")
+                # Use the centralized paper retrieval function with optional metadata
+                paper_text = fetch_paper_content(paper_id, source="biorxiv", metadata=metadata)
                 
                 # Check if we got meaningful content or an error message
                 if paper_text and not paper_text.startswith("Error"):

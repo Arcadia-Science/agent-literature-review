@@ -1539,10 +1539,13 @@ Imagine this is a transcript of a real lab conversation, not a formal discussion
                 if paper_id in self.paper_cache:
                     content = self.paper_cache[paper_id]
                     print(f"\033[1;32m✓ Using cached content for: {title[:30]}...\033[0m")
-                # If not in cache, try to download it
-                elif paper.get('source') == 'arxiv' and paper.get('arxiv_id') or paper.get('url', '').startswith('http'):
-                    # Create progress indicator for PDF download
-                    pdf_progress = ProgressIndicator(None, f"Downloading and processing PDF for {title[:30]}...")
+                # If not in cache, try to download it or load it from local folder
+                elif ((paper.get('source') == 'arxiv' and paper.get('arxiv_id')) or 
+                      (paper.get('source') == 'local_folder' and paper.get('file_path')) or 
+                      paper.get('url', '').startswith('http')):
+                    # Create progress indicator for PDF processing
+                    message = "Reading" if paper.get('source') == 'local_folder' else "Downloading and processing"
+                    pdf_progress = ProgressIndicator(None, f"{message} PDF for {title[:30]}...")
                     pdf_progress.start()
                     
                     try:
@@ -1573,6 +1576,18 @@ Imagine this is a transcript of a real lab conversation, not a formal discussion
                             else:
                                 content = full_text
                                 self.paper_cache[paper_id] = content
+                        elif paper.get('source') == 'local_folder' and paper.get('file_path'):
+                            # Use centralized function for local papers
+                            file_path = paper.get('file_path')
+                            content = fetch_paper_content(file_path, source="local_folder")
+                            if "Full Text:" in content:
+                                # Add to cache
+                                self.paper_cache[paper_id] = content
+                                print(f"\033[1;32m✓ Successfully read local paper: {title[:30]}...\033[0m")
+                            else:
+                                # Store whatever content we got
+                                self.paper_cache[paper_id] = content
+                                print(f"\033[1;32m✓ Processed local paper: {title[:30]}...\033[0m")
                         elif paper.get('url'):
                             # For other papers with URLs, use the centralized function
                             url = paper.get('url')

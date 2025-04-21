@@ -4,11 +4,13 @@ Main module for running the AI laboratory.
 This code was developed with the assistance of Claude Code.
 """
 import argparse
+import os
 import re
 from typing import List, Optional
 
 from src.config import LabConfig
 from src.agents import Laboratory
+from src.utils.document_loader import load_document
 
 
 def display_cost_estimate(lab):
@@ -67,7 +69,10 @@ def run_lab(config_path: str) -> None:
     print("• Type your message and press Enter to start the discussion")
     print("• To address specific agents directly, use '@AgentName:' at the start of a line")
     print("• Type '/discuss <topic>' to start a focused multi-round agent discussion")
-    print("• Type '/search <query> [--type arxiv|biorxiv|google|web] [--results <number>]' to search for information")
+    print("• Type '/search <query> [--type arxiv|biorxiv] [--results <number>] [--months <number>]' to search for information")
+    print("  - For bioRxiv searches, use '--months' to specify how many months back to search (default: 12)")
+    print("• Type '/read_folder <folder_path>' to have agents read and discuss papers in a local folder")
+    print("  - Reads PDF files from the specified folder and has agents discuss them directly")
     print("• Type '/cost' to see estimated API costs of the current session")
     print("• Type 'exit' to end the session")
     
@@ -103,7 +108,69 @@ def run_lab(config_path: str) -> None:
                 lab.user_message(f"I'd like you all to discuss this topic: {topic}")
                 lab.facilitate_agent_discussion(topic, rounds=2)
                 continue
+            
+            # Check for read_folder command
+            if user_input.lower().startswith('/read_folder'):
+                # Extract the folder path
+                folder_path = user_input[12:].strip()
                 
+                if not folder_path:
+                    print("\033[93mPlease provide a folder path: /read_folder <path>\033[0m")
+                    continue
+                
+                # Handle relative paths
+                if not os.path.isabs(folder_path):
+                    folder_path = os.path.abspath(os.path.join(os.getcwd(), folder_path))
+                
+                # Check if the folder exists
+                if not os.path.exists(folder_path):
+                    print(f"\033[91mError: Folder not found: {folder_path}\033[0m")
+                    continue
+                
+                if not os.path.isdir(folder_path):
+                    print(f"\033[91mError: Path is not a directory: {folder_path}\033[0m")
+                    continue
+                
+                # List PDF files in the folder
+                pdf_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.pdf')]
+                
+                if not pdf_files:
+                    print(f"\033[91mNo PDF files found in the folder: {folder_path}\033[0m")
+                    continue
+                
+                print(f"\n\033[1m📚 Found {len(pdf_files)} PDF files in: {folder_path}\033[0m")
+                
+                # Create paper results similar to search results
+                folder_results = []
+                
+                for i, pdf_file in enumerate(pdf_files):
+                    file_path = os.path.join(folder_path, pdf_file)
+                    # Extract title from filename (remove extension and replace underscores/hyphens)
+                    title = os.path.splitext(pdf_file)[0].replace('_', ' ').replace('-', ' ')
+                    
+                    # Create a search result-like object for the file
+                    paper = {
+                        "title": title,
+                        "file_path": file_path,
+                        "url": f"file://{file_path}",
+                        "source": "local_folder",
+                        "summary": f"Local PDF file: {pdf_file}"
+                    }
+                    
+                    folder_results.append(paper)
+                    print(f"  {i+1}. {title}")
+                
+                # Store the results for discussion
+                lab.last_search_results = folder_results
+                lab.last_command_was_search = True
+                
+                # Add the command to the conversation
+                search_message = f"I've loaded {len(folder_results)} papers from folder: {folder_path}"
+                lab.user_message(search_message)
+                
+                # Display instructions for continuing with paper discussion
+                print("\n\033[93mType 'continue' to have agents read and discuss these papers.\033[0m")
+                continue
             
             # Check for search command
             if user_input.lower().startswith('/search'):
@@ -112,12 +179,13 @@ def run_lab(config_path: str) -> None:
                 query = parts[0].strip()
                 
                 if not query:
-                    print("\033[93mPlease provide a search query: /search <query> [--type arxiv|biorxiv] [--results <number>]\033[0m")
+                    print("\033[93mPlease provide a search query: /search <query> [--type arxiv|biorxiv] [--results <number>] [--months <number>]\033[0m")
                     continue
                 
                 # Parse options
                 search_type = "arxiv"  # default
                 num_results = 3  # default
+                months = 12  # default for biorxiv searches
                 
                 for part in parts[1:]:
                     if part.startswith('type '):
@@ -125,6 +193,11 @@ def run_lab(config_path: str) -> None:
                     elif part.startswith('results '):
                         try:
                             num_results = int(part[8:].strip())
+                        except ValueError:
+                            pass
+                    elif part.startswith('months '):
+                        try:
+                            months = int(part[7:].strip())
                         except ValueError:
                             pass
                 
@@ -139,8 +212,12 @@ def run_lab(config_path: str) -> None:
                         break
                 
                 # Perform search
-                print(f"\n\033[1m🔍 Searching {search_type} for: {query}\033[0m")
-                results = agent.search_web(query, search_type, num_results)
+                if search_type.lower() == "biorxiv":
+                    print(f"\n\033[1m🔍 Searching {search_type} for papers published in the last {months} months matching: {query}\033[0m")
+                    results = agent.search_web(query, search_type, num_results, months=months)
+                else:
+                    print(f"\n\033[1m🔍 Searching {search_type} for: {query}\033[0m")
+                    results = agent.search_web(query, search_type, num_results)
                 
                 # Store the results for potential "continue" command
                 lab.last_search_results = results
@@ -189,7 +266,6 @@ def run_lab(config_path: str) -> None:
                 continue
                 
                 
-            
             # Check for cost command
             if user_input.lower() == '/cost':
                 display_cost_estimate(lab)

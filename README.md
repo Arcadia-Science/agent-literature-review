@@ -2,6 +2,8 @@
 
 A virtual laboratory of AI agents designed to facilitate collaborative scientific research discussions and planning. This project is a very rough prototype.
 
+> **Note on Paper Access**: The bioRxiv search functionality is limited and sometimes unstable due to API constraints. To address this limitation, a new `/read_folder` command has been added, allowing agents to read and discuss papers from a local folder. This provides a more reliable alternative when online searches don't return the desired results.
+
 ## Overview
 
 This project creates a terminal-based application that simulates a laboratory environment with multiple AI agents, each with different specialties. The lab provides a space for:
@@ -83,7 +85,9 @@ Your AI research team:
 • Type your message and press Enter to start the discussion
 • To address specific agents directly, use '@AgentName:' at the start of a line
 • Type '/discuss <topic>' to start a focused multi-round agent discussion
-• Type '/search <query> [--type arxiv|biorxiv|google|web] [--results <number>]' to search for information
+• Type '/search <query> [--type arxiv|biorxiv] [--results <number>] [--months <number>]' to search for information
+  - For bioRxiv searches, use '--months' to specify how many months back to search (default: 12)
+• Type '/read_folder <folder_path>' to have agents read and discuss papers in a local folder
 • Type '/cost' to see estimated API costs of the current session
 • Type 'exit' to end the session
 
@@ -253,3 +257,42 @@ What are the latest developments in large language model few-shot learning?
 ```
 
 Agents will integrate information from arXiv and bioRxiv when appropriate.
+
+### Paper Search and Reading
+
+The system provides two ways to find and discuss scientific papers:
+
+#### 1. Online Search via `/search`
+
+```
+/search protein folding --type arxiv --results 5
+/search cancer immunotherapy --type biorxiv --months 6 --results 3
+```
+
+**Important Note on bioRxiv Search:**
+The bioRxiv API does not provide full search functionality. Instead, it can only:
+- List papers published within a specified time range (using the `--months` parameter)
+- Return the most recent papers that include certain terms
+- Results are deduplicated to show only the latest version of each paper
+
+This means bioRxiv searches may not be as precise as arXiv searches. For specific papers or detailed searches, using the `/read_folder` command with local files may be more effective.
+
+#### 2. Local Paper Reading via `/read_folder`
+
+For cases where you have specific papers you want to discuss or when online search doesn't yield the needed results, you can use local PDF files:
+
+```
+/read_folder ~/papers/quantum_computing
+```
+
+This command will:
+1. Scan the specified folder for PDF files
+2. Display a list of found papers (based on filenames)
+3. After typing 'continue', agents will read and discuss these papers
+
+The `/read_folder` command provides a reliable alternative to online searches, especially when:
+- You have specific papers you want the agents to analyze
+- Online searches don't return the exact papers needed
+- You need to discuss papers that might not be available through arXiv or bioRxiv
+
+Both workflows follow the same pattern - after search or folder selection, type 'continue' to have agents read and discuss the papers.
